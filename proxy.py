@@ -1,97 +1,92 @@
 import socket
 import os
-import threading
 from threading import Thread
-from time import sleep
-import parser
 from importlib import reload
-import sys
+import parser
 
-# Client ---> Proxy ---> Server
-class Game2Proxy(Thread):
-    def __init__(self):
-        super(Game2Proxy, self).__init__()
-        self.daemon = True
+# Part 9
+# Developing a TCP Network Proxy - Pwn Adventure 3
+# https://www.youtube.com/watch?v=iApNzWZG-10
 
-        self.ip = "localhost"
-        self.port = 25566
-        self.proxyserver = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
-        self.fowardto = None  # Proxyclient socket
-
-        self.proxyserver.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.proxyserver.bind((self.ip, self.port))
-        self.proxyserver.listen(1)
-
-        self.client, self.addr = self.proxyserver.accept()
-        sleep(1)
-
-    def run(self):
-        while True:
-            try:
-                data = self.client.recv(16384)
-                self.fowardto.sendall(data)
-                reload(parser)
-                parser.parse(data, "client")
-            except ConnectionResetError as cre:
-                print("Connection Reset Errror")
-            except BrokenPipeError as bpe:
-                print("Broken Pipe Error G2P")
-            except Exception as ex:
-                print("[S-->P] Parser error: {0}".format(ex))
-
-
-# Client <--- Proxy <--- Server
 class Proxy2Server(Thread):
-    def __init__(self):
+
+    def __init__(self, host, port):
         super(Proxy2Server, self).__init__()
-        self.daemon = True
+        self.game = None # game client socket not known yet
+        self.port = port
+        self.host = host
+        self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server.connect((host, port))
 
-        self.server_ip = "localhost"
-        self.server_port = 25565
-        self.proxyclient = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # run in thread
+    def run(self):
+        while True:
+            data = self.server.recv(4096)
+            if data:
+                #print "[{}] <- {}".format(self.port, data[:100].encode('hex'))
+                try:
+                    reload(parser)
+                    parser.parse(data, 'server')
+                except Exception as e:
+                    print('server[{}]'.format(self.port), e)
+                # forward to client
+                self.game.sendall(data)
 
-        self.fowardto = None  # Client socket
+class Game2Proxy(Thread):
+
+    def __init__(self, host, port):
+        super(Game2Proxy, self).__init__()
+        self.server = None # real server socket not known yet
+        self.port = port
+        self.host = host
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((host, port))
+        sock.listen(1)
+        # waiting for a connection
+        self.game, addr = sock.accept()
 
     def run(self):
         while True:
-            self.proxyclient.connect((self.server_ip, self.server_port))
-            while True:
-                if self.fowardto is not None:
-                    try:
-                        data = self.proxyclient.recv(4096)
-                        self.fowardto.sendall(data)
-                        parser.parse(data, "server")
-                    except ConnectionResetError as cre:
-                        print("Connection Reset Errror")
-                    except BrokenPipeError as bpe:
-                        print("Broken Pipe Error P2S")
-                    except Exception as ex:
-                        print("[S-->P] Parser error: {0}".format(ex))
+            data = self.game.recv(4096)
+            if data:
+                #print "[{}] -> {}".format(self.port, data[:100].encode('hex'))
+                try:
+                    reload(parser)
+                    parser.parse(data, 'client')
+                except Exception as e:
+                    print('client[{}]'.format(self.port), e)
+                # forward to server
+                self.server.sendall(data)
+
+class Proxy(Thread):
+
+    def __init__(self, from_host, to_host, port):
+        super(Proxy, self).__init__()
+        self.from_host = from_host
+        self.to_host = to_host
+        self.port = port
+
+    def run(self):
+        while True:
+            print("[proxy({})] setting up".format(self.port))
+            self.g2p = Game2Proxy(self.from_host, 25566) # waiting for a client #TODO remove hardcoded
+            self.p2s = Proxy2Server(self.to_host, self.port)
+            print("[proxy({})] connection established".format(self.port))
+            self.g2p.server = self.p2s.server
+            self.p2s.game = self.g2p.game
+
+            self.g2p.start()
+            self.p2s.start()
 
 
-def main():
-    print("Setting up")
-    pts = Proxy2Server()
-    print("Waiting for a client")
-    gtp = Game2Proxy()
-    print("Client connected")
-    sleep(0.5)
-    pts.fowardto = gtp.client
-    gtp.fowardto = pts.proxyclient
-    gtp.start()
-    pts.start()
-    print("Setup finished")
-    while True:
-        if gtp.client is None:
-            print("Client disconnected")
-        try:
-            inp = input("$ ")
-            print(inp)
-        except KeyboardInterrupt as kbi:
-            print("Keyboard Interrupt Exception, shutting down")
-            sys.exit(0)
+master_server = Proxy('localhost', 'localhost', 25565)
+master_server.start()
 
-
-if __name__ == "__main__":
-    main()
+while True:
+    try:
+        cmd = input('$ ')
+        if cmd[:4] == 'quit':
+            os._exit(0)
+    except Exception as e:
+        print(e)
